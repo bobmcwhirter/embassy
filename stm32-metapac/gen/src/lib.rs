@@ -19,7 +19,6 @@ pub struct Chip {
     pub cores: Vec<Core>,
     pub flash: u32,
     pub ram: u32,
-    pub gpio_af: String,
     pub packages: Vec<Package>,
 }
 
@@ -28,6 +27,7 @@ pub struct Core {
     pub name: String,
     pub peripherals: HashMap<String, Peripheral>,
     pub interrupts: HashMap<String, u32>,
+    pub dma_channels: HashMap<String, DmaChannel>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize)]
@@ -47,6 +47,10 @@ pub struct Peripheral {
     pub clock: Option<String>,
     #[serde(default)]
     pub pins: Vec<Pin>,
+    #[serde(default)]
+    pub dma_channels: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub dma_requests: HashMap<String, u32>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize)]
@@ -54,6 +58,12 @@ pub struct Pin {
     pub pin: String,
     pub signal: String,
     pub af: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Deserialize)]
+pub struct DmaChannel {
+    pub dma: String,
+    pub channel: u32,
 }
 
 struct BlockInfo {
@@ -124,7 +134,7 @@ macro_rules! {} {{
 ",
         name, name
     )
-    .unwrap();
+        .unwrap();
 
     for row in data {
         write!(out, "        __{}_inner!(({}));\n", name, row.join(",")).unwrap();
@@ -135,7 +145,7 @@ macro_rules! {} {{
         "    }};
 }}"
     )
-    .unwrap();
+        .unwrap();
 }
 
 pub struct Options {
@@ -221,6 +231,9 @@ pub fn gen(options: Options) {
         let mut peripherals_table: Vec<Vec<String>> = Vec::new();
         let mut peripheral_pins_table: Vec<Vec<String>> = Vec::new();
         let mut peripheral_rcc_table: Vec<Vec<String>> = Vec::new();
+        let mut dma_channels_table: Vec<Vec<String>> = Vec::new();
+        let mut dma_requests_table: Vec<Vec<String>> = Vec::new();
+        let mut peripheral_dma_channels_table: Vec<Vec<String>> = Vec::new();
 
         let dma_base = core
             .peripherals
@@ -231,6 +244,14 @@ pub fn gen(options: Options) {
 
         let gpio_base = core.peripherals.get(&"GPIOA".to_string()).unwrap().address;
         let gpio_stride = 0x400;
+
+        for (id, channel_info) in &core.dma_channels {
+            let mut row = Vec::new();
+            row.push(id.clone());
+            row.push(channel_info.dma.clone() );
+            row.push(channel_info.channel.to_string());
+            dma_channels_table.push(row);
+        }
 
         for (name, p) in &core.peripherals {
             let mut ir_peri = ir::Peripheral {
@@ -258,13 +279,35 @@ pub fn gen(options: Options) {
                     peripheral_pins_table.push(row);
                 }
 
+                for dma_request in &p.dma_requests {
+                    let mut row = Vec::new();
+                    row.push(name.clone());
+                    row.push(dma_request.0.clone());
+                    row.push(dma_request.1.to_string());
+                    dma_requests_table.push(row);
+                }
+
+                for (event, dma_channels) in &p.dma_channels {
+                    for channel in dma_channels.iter() {
+                        let mut row = Vec::new();
+                        row.push(name.clone());
+                        row.push( bi.module.clone() );
+                        row.push( bi.block.clone() );
+                        row.push(event.clone());
+                        row.push( channel.clone() );
+                        row.push( core.dma_channels[channel].dma.clone() );
+                        row.push( core.dma_channels[channel].channel.to_string() );
+                        peripheral_dma_channels_table.push(row);
+                    }
+                }
+
                 let mut peripheral_row = Vec::new();
                 peripheral_row.push(bi.module.clone());
                 peripheral_row.push(name.clone());
                 peripherals_table.push(peripheral_row);
 
                 if let Some(old_version) =
-                    peripheral_versions.insert(bi.module.clone(), bi.version.clone())
+                peripheral_versions.insert(bi.module.clone(), bi.version.clone())
                 {
                     if old_version != bi.version {
                         panic!(
@@ -403,7 +446,10 @@ pub fn gen(options: Options) {
         make_table(&mut extra, "peripherals", &peripherals_table);
         make_table(&mut extra, "peripheral_versions", &peripheral_version_table);
         make_table(&mut extra, "peripheral_pins", &peripheral_pins_table);
+        make_table(&mut extra, "peripheral_dma_channels", &peripheral_dma_channels_table);
         make_table(&mut extra, "peripheral_rcc", &peripheral_rcc_table);
+        make_table(&mut extra, "dma_channels", &dma_channels_table);
+        make_table(&mut extra, "dma_requests", &dma_requests_table);
 
         for (module, version) in peripheral_versions {
             all_peripheral_versions.insert((module.clone(), version.clone()));
@@ -412,7 +458,7 @@ pub fn gen(options: Options) {
                 "#[path=\"../../peripherals/{}_{}.rs\"] pub mod {};\n",
                 module, version, module
             )
-            .unwrap();
+                .unwrap();
         }
 
         // Cleanups!
@@ -450,7 +496,7 @@ pub fn gen(options: Options) {
                 "PROVIDE({} = DefaultHandler);\n",
                 name.to_ascii_uppercase()
             )
-            .unwrap();
+                .unwrap();
         }
 
         File::create(chip_dir.join("device.x"))
@@ -478,7 +524,7 @@ pub fn gen(options: Options) {
             transform::NameKind::Enum => format!("vals::{}", s),
             _ => s.to_string(),
         })
-        .unwrap();
+            .unwrap();
 
         transform::sort::Sort {}.run(&mut ir).unwrap();
         transform::Sanitize {}.run(&mut ir).unwrap();
@@ -489,7 +535,7 @@ pub fn gen(options: Options) {
                 .join("src/peripherals")
                 .join(format!("{}_{}.rs", module, version)),
         )
-        .unwrap();
+            .unwrap();
         let data = items.to_string().replace("] ", "]\n");
 
         // Remove inner attributes like #![no_std]
@@ -512,14 +558,14 @@ pub fn gen(options: Options) {
                 "#[cfg_attr(feature=\"{}_{}\", path = \"chips/{}_{}/pac.rs\")]",
                 x, c, x, c
             )
-            .unwrap();
+                .unwrap();
         } else {
             write!(
                 &mut paths,
                 "#[cfg_attr(feature=\"{}\", path = \"chips/{}/pac.rs\")]",
                 x, x
             )
-            .unwrap();
+                .unwrap();
         }
     }
     let mut contents: Vec<u8> = Vec::new();
@@ -542,7 +588,7 @@ pub fn gen(options: Options) {
         out_dir.join("src").join("common.rs"),
         generate::COMMON_MODULE,
     )
-    .unwrap();
+        .unwrap();
 
     // Generate Cargo.toml
     const BUILDDEP_BEGIN: &[u8] = b"# BEGIN BUILD DEPENDENCIES";
